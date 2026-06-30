@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ from tqdm.auto import tqdm
 from src.data import RecipeRetrievalDataset, load_recipe_records, load_split_ids, make_image_transform
 from src.metrics import retrieval_metrics
 from src.model import CrossModalRecipeModel
+from src.profiling import count_parameters, format_count, measure_forward_latency, profile_forward_flops, synchronize_if_needed
 
 
 def parse_args():
@@ -21,6 +23,7 @@ def parse_args():
     parser.add_argument("--output_dir", default="results_v2")
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--num_workers", type=int)
+    parser.add_argument("--profile_batches", type=int, default=10)
     return parser.parse_args()
 
 
@@ -87,15 +90,31 @@ def main():
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
+    param_stats = count_parameters(model)
+    print(
+        "[profile] Params total="
+        f"{format_count(param_stats['params_total'])} "
+        f"trainable={format_count(param_stats['params_trainable'])}",
+        flush=True,
+    )
 
     image_embs, recipe_embs, recipe_ids, image_ids = [], [], [], []
+    forward_seconds = 0.0
+    forward_samples = 0
+    wall_start = time.perf_counter()
     for batch in tqdm(loader, desc=f"eval {args.split}", leave=False):
         batch = to_device(batch, device)
+        synchronize_if_needed(device)
+        forward_start = time.perf_counter()
         output = model(batch)
+        synchronize_if_needed(device)
+        forward_seconds += time.perf_counter() - forward_start
+        forward_samples += int(batch["image"].shape[0])
         image_embs.append(output["image_emb"].cpu().numpy())
         recipe_embs.append(output["recipe_emb"].cpu().numpy())
         recipe_ids.extend(batch["recipe_id"])
         image_ids.extend(batch["image_id"])
+    wall_seconds = time.perf_counter() - wall_start
 
     image_arr = np.concatenate(image_embs, axis=0)
     recipe_arr = np.concatenate(recipe_embs, axis=0)
@@ -103,9 +122,32 @@ def main():
     for prefix, query, target in (("i2r", image_arr, recipe_arr), ("r2i", recipe_arr, image_arr)):
         for key, value in retrieval_metrics(query, target).items():
             metrics[f"{prefix}_{key}"] = value
+    metrics.update(
+        {
+            "eval_wall_seconds": wall_seconds,
+            "inference_forward_seconds": forward_seconds,
+            "inference_samples": int(forward_samples),
+            "inference_ms_per_sample": forward_seconds * 1000.0 / max(forward_samples, 1),
+        }
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    profile_stats = dict(param_stats)
+    try:
+        profile_batch = next(iter(loader))
+        profile_batch = to_device(profile_batch, device)
+        profile_stats.update(profile_forward_flops(model, profile_batch, device))
+        profile_stats.update(measure_forward_latency(model, profile_batch, device, repeats=args.profile_batches))
+        if "flops_per_sample" in profile_stats:
+            print(
+                "[profile] FLOPs/sample="
+                f"{format_count(profile_stats['flops_per_sample'])} "
+                f"latency={profile_stats['inference_ms_per_sample']:.3f} ms/sample",
+                flush=True,
+            )
+    except Exception as exc:
+        profile_stats["profile_error"] = str(exc)
     np.savez_compressed(
         output_dir / f"{args.split}_embeddings.npz",
         image_embs=image_arr,
@@ -115,6 +157,8 @@ def main():
     )
     with open(output_dir / f"{args.split}_metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
+    with open(output_dir / f"{args.split}_profile.json", "w", encoding="utf-8") as f:
+        json.dump(profile_stats, f, indent=2)
     print(json.dumps(metrics, indent=2))
 
 

@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ from src.data import (
 from src.losses import symmetric_contrastive_loss
 from src.metrics import retrieval_metrics
 from src.model import CrossModalRecipeModel
+from src.profiling import count_parameters, format_count, measure_forward_latency, profile_forward_flops, synchronize_if_needed
 
 
 def parse_args():
@@ -44,6 +46,7 @@ def parse_args():
     parser.add_argument("--num_workers", type=int)
     parser.add_argument("--grad_accum_steps", type=int)
     parser.add_argument("--ingredient_loss_weight", type=float)
+    parser.add_argument("--profile_batches", type=int)
     parser.add_argument("--max_title_len", type=int)
     parser.add_argument("--max_ing_len", type=int)
     parser.add_argument("--max_inst_len", type=int)
@@ -238,12 +241,20 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, epoch, sample
 def evaluate(model, loader, device, cfg, distributed=False, show_progress=True):
     model.eval()
     image_embs, recipe_embs, recipe_ids, image_ids = [], [], [], []
+    forward_seconds = 0.0
+    forward_samples = 0
+    wall_start = time.perf_counter()
     progress = tqdm(loader, desc="eval", disable=not show_progress, leave=False)
     for step, batch in enumerate(progress):
         if cfg.get("limit_val_batches") and step >= cfg["limit_val_batches"]:
             break
         batch = to_device(batch, device)
+        synchronize_if_needed(device)
+        forward_start = time.perf_counter()
         output = model(batch)
+        synchronize_if_needed(device)
+        forward_seconds += time.perf_counter() - forward_start
+        forward_samples += int(batch["image"].shape[0])
         image_embs.append(output["image_emb"].detach().cpu().numpy())
         recipe_embs.append(output["recipe_emb"].detach().cpu().numpy())
         recipe_ids.extend(batch["recipe_id"])
@@ -272,6 +283,10 @@ def evaluate(model, loader, device, cfg, distributed=False, show_progress=True):
     for prefix, query, target in (("i2r", image_arr, recipe_arr), ("r2i", recipe_arr, image_arr)):
         for key, value in retrieval_metrics(query, target).items():
             metrics[f"{prefix}_{key}"] = value
+    metrics["eval_wall_seconds"] = time.perf_counter() - wall_start
+    metrics["inference_forward_seconds"] = forward_seconds
+    metrics["inference_samples"] = int(forward_samples)
+    metrics["inference_ms_per_sample"] = forward_seconds * 1000.0 / max(forward_samples, 1)
     return metrics, merged
 
 
@@ -327,6 +342,48 @@ def main():
     if distributed:
         model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None)
     log_main(rank, "[model] Model is ready.")
+    raw_model = model.module if hasattr(model, "module") else model
+    if is_main(rank):
+        param_stats = count_parameters(raw_model)
+        profile_stats = dict(param_stats)
+        print(
+            "[profile] Params total="
+            f"{format_count(param_stats['params_total'])} "
+            f"trainable={format_count(param_stats['params_trainable'])}",
+            flush=True,
+        )
+        try:
+            profile_batch = next(iter(loaders["val"]))
+            profile_batch = to_device(profile_batch, device)
+            flops_stats = profile_forward_flops(raw_model, profile_batch, device)
+            latency_stats = measure_forward_latency(
+                raw_model,
+                profile_batch,
+                device,
+                repeats=cfg.get("profile_batches") or 10,
+            )
+            profile_stats.update(flops_stats)
+            profile_stats.update(latency_stats)
+            if "flops_per_sample" in flops_stats:
+                print(
+                    "[profile] FLOPs/sample="
+                    f"{format_count(flops_stats['flops_per_sample'])} "
+                    f"FLOPs/batch={format_count(flops_stats['flops_per_batch'])}",
+                    flush=True,
+                )
+            else:
+                print(f"[profile] FLOPs unavailable: {flops_stats.get('flops_error')}", flush=True)
+            print(
+                "[profile] Inference latency="
+                f"{latency_stats['inference_ms_per_sample']:.3f} ms/sample "
+                f"({latency_stats['inference_seconds_per_batch']:.4f} s/batch)",
+                flush=True,
+            )
+        except Exception as exc:
+            profile_stats["profile_error"] = str(exc)
+            print(f"[profile] Skipped profiling: {exc}", flush=True)
+        with open(output_dir / "model_profile.json", "w", encoding="utf-8") as f:
+            json.dump(profile_stats, f, indent=2)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     scaler = GradScaler("cuda", enabled=cfg["amp"] and torch.cuda.is_available())
@@ -341,8 +398,11 @@ def main():
         best_recall = ckpt["best_recall"]
 
     history = []
+    training_start = time.perf_counter()
     for epoch in range(start_epoch, cfg["epochs"]):
         log_main(rank, f"[epoch {epoch}] Training started.")
+        epoch_start = time.perf_counter()
+        train_start = time.perf_counter()
         train_loss = train_one_epoch(
             model,
             loaders["train"],
@@ -354,9 +414,21 @@ def main():
             train_sampler,
             show_progress=is_main(rank),
         )
+        train_seconds = time.perf_counter() - train_start
+        eval_start = time.perf_counter()
         val_metrics, val_outputs = evaluate(model, loaders["val"], device, cfg, distributed, show_progress=is_main(rank))
+        eval_seconds = time.perf_counter() - eval_start
+        epoch_seconds = time.perf_counter() - epoch_start
         recall10 = val_metrics.get("i2r_R@10", 0.0)
-        row = {"epoch": epoch, "train_loss": train_loss, **val_metrics}
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_seconds": train_seconds,
+            "eval_seconds": eval_seconds,
+            "epoch_seconds": epoch_seconds,
+            "total_training_seconds": time.perf_counter() - training_start,
+            **val_metrics,
+        }
         history.append(row)
         if is_main(rank):
             print(json.dumps(row, indent=2))

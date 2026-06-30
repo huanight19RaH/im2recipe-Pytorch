@@ -32,3 +32,4 @@ ingredient_loss_weight: 0.05
 
 limit_train_batches:
 limit_val_batches:
+profile_batches: 10

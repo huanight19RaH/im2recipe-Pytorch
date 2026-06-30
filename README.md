@@ -236,6 +236,8 @@ python train_v2.py \
 
 The v2 model uses a dual encoder with a pretrained image backbone, a small hierarchical Transformer recipe encoder, symmetric in-batch contrastive loss, and an optional multi-label ingredient regularizer.
 Checkpoints and metrics are written to the output directory as `best.pt`, `last.pt`, `metrics.json`, and `val_embeddings.npz`.
+Training also writes `model_profile.json`, which contains total/trainable parameters, estimated forward FLOPs, and one-batch inference latency.
+Each row in `metrics.json` includes `train_seconds`, `eval_seconds`, `epoch_seconds`, `total_training_seconds`, and validation inference timing.
 
 Evaluate the best checkpoint:
 
@@ -246,6 +248,9 @@ python eval_v2.py \
   --split test \
   --output_dir /kaggle/working/im2recipe_runs
 ```
+
+Evaluation writes `<split>_metrics.json`, `<split>_profile.json`, and `<split>_embeddings.npz`.
+The metrics JSON includes retrieval scores plus `inference_ms_per_sample`.
 
 ## Recipes with nutritional info
 
