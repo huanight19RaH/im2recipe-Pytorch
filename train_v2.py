@@ -13,6 +13,7 @@ from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from tqdm.auto import tqdm
 
 from src.data import (
     RecipeRetrievalDataset,
@@ -188,14 +189,15 @@ def build_loaders(cfg, distributed, rank, world_size):
     return loaders, train_sampler, meta
 
 
-def train_one_epoch(model, loader, optimizer, scaler, device, cfg, epoch, sampler=None):
+def train_one_epoch(model, loader, optimizer, scaler, device, cfg, epoch, sampler=None, show_progress=True):
     model.train()
     if sampler is not None:
         sampler.set_epoch(epoch)
     total_loss = 0.0
     steps = 0
     optimizer.zero_grad(set_to_none=True)
-    for step, batch in enumerate(loader):
+    progress = tqdm(loader, desc=f"train epoch {epoch}", disable=not show_progress, leave=False)
+    for step, batch in enumerate(progress):
         if cfg.get("limit_train_batches") and step >= cfg["limit_train_batches"]:
             break
         batch = to_device(batch, device)
@@ -213,6 +215,8 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, epoch, sample
             optimizer.zero_grad(set_to_none=True)
         total_loss += float(loss.detach().cpu()) * cfg["grad_accum_steps"]
         steps += 1
+        if show_progress:
+            progress.set_postfix(loss=f"{total_loss / max(steps, 1):.4f}")
     if steps > 0 and steps % cfg["grad_accum_steps"] != 0:
         scaler.step(optimizer)
         scaler.update()
@@ -221,10 +225,11 @@ def train_one_epoch(model, loader, optimizer, scaler, device, cfg, epoch, sample
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, cfg, distributed=False):
+def evaluate(model, loader, device, cfg, distributed=False, show_progress=True):
     model.eval()
     image_embs, recipe_embs, recipe_ids, image_ids = [], [], [], []
-    for step, batch in enumerate(loader):
+    progress = tqdm(loader, desc="eval", disable=not show_progress, leave=False)
+    for step, batch in enumerate(progress):
         if cfg.get("limit_val_batches") and step >= cfg["limit_val_batches"]:
             break
         batch = to_device(batch, device)
@@ -323,8 +328,18 @@ def main():
 
     history = []
     for epoch in range(start_epoch, cfg["epochs"]):
-        train_loss = train_one_epoch(model, loaders["train"], optimizer, scaler, device, cfg, epoch, train_sampler)
-        val_metrics, val_outputs = evaluate(model, loaders["val"], device, cfg, distributed)
+        train_loss = train_one_epoch(
+            model,
+            loaders["train"],
+            optimizer,
+            scaler,
+            device,
+            cfg,
+            epoch,
+            train_sampler,
+            show_progress=is_main(rank),
+        )
+        val_metrics, val_outputs = evaluate(model, loaders["val"], device, cfg, distributed, show_progress=is_main(rank))
         recall10 = val_metrics.get("i2r_R@10", 0.0)
         row = {"epoch": epoch, "train_loss": train_loss, **val_metrics}
         history.append(row)

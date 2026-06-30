@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from src.data import RecipeRetrievalDataset, load_recipe_records, load_split_ids, make_image_transform
 from src.metrics import retrieval_metrics
@@ -88,7 +89,7 @@ def main():
     model.eval()
 
     image_embs, recipe_embs, recipe_ids, image_ids = [], [], [], []
-    for batch in loader:
+    for batch in tqdm(loader, desc=f"eval {args.split}", leave=False):
         batch = to_device(batch, device)
         output = model(batch)
         image_embs.append(output["image_emb"].cpu().numpy())
