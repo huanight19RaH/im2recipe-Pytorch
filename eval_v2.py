@@ -34,7 +34,14 @@ def to_device(batch, device):
 def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    checkpoint_path = Path(args.checkpoint)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint_path}\n"
+            "This usually means training failed before saving best.pt, or --output_dir/--checkpoint points to the wrong folder.\n"
+            "On Kaggle, check the files with: !find /kaggle/working -maxdepth 3 -name '*.pt' -print"
+        )
+    ckpt = torch.load(checkpoint_path, map_location=device)
     cfg = ckpt["config"]
     if args.data_root:
         cfg["data_root"] = args.data_root

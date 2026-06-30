@@ -115,13 +115,25 @@ def _find_file(data_root, candidates):
         matches.extend(root.glob(pattern))
     if matches:
         return matches[0]
-    raise FileNotFoundError("Could not find any of: " + ", ".join(candidates))
+    for pattern in candidates:
+        matches.extend(root.rglob(pattern))
+    if matches:
+        return matches[0]
+    visible = []
+    if root.exists():
+        visible = [str(p.relative_to(root)) for p in list(root.iterdir())[:20]]
+    raise FileNotFoundError(
+        "Could not find any of: "
+        + ", ".join(candidates)
+        + f" under {root}. Visible entries: {visible}"
+    )
 
 
 def load_recipe_records(data_root, image_root=None):
     data_root = Path(data_root)
-    image_root = Path(image_root) if image_root else data_root / "images" / "images"
     layer1_path = _find_file(data_root, ["layer1_subset.json", "layer1_subset (1).json", "layer1*.json"])
+    actual_root = layer1_path.parent
+    image_root = Path(image_root) if image_root else actual_root / "images" / "images"
     layer2_path = _find_file(data_root, ["layer2_subset.json", "layer2_subset (1).json", "layer2*.json"])
 
     layer1 = _read_json(layer1_path)
@@ -150,7 +162,7 @@ def load_recipe_records(data_root, image_root=None):
 
 
 def load_split_ids(data_root, split):
-    return _read_ids(Path(data_root) / f"{split}_ids.txt")
+    return _read_ids(_find_file(data_root, [f"{split}_ids.txt"]))
 
 
 def build_text_vocab(records, train_ids, min_freq=1, max_vocab=30000):

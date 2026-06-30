@@ -196,6 +196,32 @@ torchrun --nproc_per_node=2 train_v2.py \
   --output_dir /kaggle/working/im2recipe_runs
 ```
 
+Inside a Kaggle Notebook cell, prefix shell commands with `!` or use a `%%bash` cell:
+
+```python
+!torchrun --nproc_per_node=2 train_v2.py \
+  --config configs/kaggle.yaml \
+  --data_root /kaggle/input/recipe10k/recipe10k \
+  --output_dir /kaggle/working/im2recipe_runs
+```
+
+```bash
+%%bash
+torchrun --nproc_per_node=2 train_v2.py \
+  --config configs/kaggle.yaml \
+  --data_root /kaggle/input/recipe10k/recipe10k \
+  --output_dir /kaggle/working/im2recipe_runs
+```
+
+If the dataset path is unclear, find the real folder first:
+
+```python
+!find /kaggle/input -maxdepth 5 -name "layer1*.json" -print
+```
+
+Use the parent folder of the printed `layer1...json` file as `--data_root`.
+The v2 loader also searches subfolders, so passing `/kaggle/input` is acceptable for a quick check.
+
 Useful smoke-test command:
 
 ```bash
