@@ -1,0 +1,34 @@
+data_root: /kaggle/input/recipe10k/recipe10k
+image_root:
+output_dir: /kaggle/working/im2recipe_runs
+
+backbone: resnet50
+pretrained: true
+emb_dim: 512
+text_dim: 256
+transformer_heads: 4
+transformer_layers: 1
+dropout: 0.1
+
+epochs: 10
+batch_size: 32
+lr: 0.0001
+weight_decay: 0.0001
+temperature: 0.07
+grad_accum_steps: 1
+amp: true
+num_workers: 2
+seed: 1234
+
+max_vocab: 30000
+min_freq: 1
+max_title_len: 32
+max_ing_len: 96
+max_inst_len: 256
+
+use_ingredient_loss: true
+num_ingredient_labels: 100
+ingredient_loss_weight: 0.05
+
+limit_train_batches:
+limit_val_batches:

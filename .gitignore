@@ -1,1 +1,25 @@
 *.pyc
+__pycache__/
+
+# Local datasets and archives
+recipe10k/
+archive.zip
+*.zip
+*.tar
+*.tar.gz
+
+# Training outputs
+checkpoints/
+logs/
+results/
+runs/
+outputs/
+wandb/
+*.pt
+*.pth
+*.pth.tar
+
+# Kaggle/local generated files
+kaggle/working/
+*.jsonl
+metrics.json

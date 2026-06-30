@@ -161,6 +161,66 @@ python test.py --model_path=snapshots/model_e500_v-8.950.pth.tar
 ```
 Our best model trained with Recipe1M (CVPR paper) can be downloaded [here](http://data.csail.mit.edu/im2recipe/model_e220_v-4.700.pth.tar).
 
+## Kaggle-ready improved pipeline
+
+This repository also includes a lightweight v2 pipeline for small Recipe1M-style subsets such as `recipe10k`.
+It reads raw JSON directly, so it does not require LMDB files or skip-instruction `.t7` features.
+
+Expected data layout:
+
+```text
+recipe10k/
+  layer1_subset (1).json
+  layer2_subset (1).json
+  train_ids.txt
+  val_ids.txt
+  test_ids.txt
+  images/images/0/f/a/8/0fa8309c13.jpg
+```
+
+Single GPU:
+
+```bash
+python train_v2.py \
+  --config configs/kaggle.yaml \
+  --data_root /kaggle/input/recipe10k/recipe10k \
+  --output_dir /kaggle/working/im2recipe_runs
+```
+
+Two GPUs on Kaggle:
+
+```bash
+torchrun --nproc_per_node=2 train_v2.py \
+  --config configs/kaggle.yaml \
+  --data_root /kaggle/input/recipe10k/recipe10k \
+  --output_dir /kaggle/working/im2recipe_runs
+```
+
+Useful smoke-test command:
+
+```bash
+python train_v2.py \
+  --data_root /kaggle/input/recipe10k/recipe10k \
+  --output_dir /kaggle/working/im2recipe_smoke \
+  --epochs 1 \
+  --batch_size 8 \
+  --limit_train_batches 20 \
+  --limit_val_batches 10
+```
+
+The v2 model uses a dual encoder with a pretrained image backbone, a small hierarchical Transformer recipe encoder, symmetric in-batch contrastive loss, and an optional multi-label ingredient regularizer.
+Checkpoints and metrics are written to the output directory as `best.pt`, `last.pt`, `metrics.json`, and `val_embeddings.npz`.
+
+Evaluate the best checkpoint:
+
+```bash
+python eval_v2.py \
+  --checkpoint /kaggle/working/im2recipe_runs/best.pt \
+  --data_root /kaggle/input/recipe10k/recipe10k \
+  --split test \
+  --output_dir /kaggle/working/im2recipe_runs
+```
+
 ## Recipes with nutritional info
 
 We also provide a subset of recipes with nutritional information. Below you can see an example:
