@@ -88,6 +88,11 @@ def is_main(rank):
     return rank == 0
 
 
+def log_main(rank, message):
+    if is_main(rank):
+        print(message, flush=True)
+
+
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -111,11 +116,16 @@ def gather_objects(obj, distributed):
 
 
 def build_loaders(cfg, distributed, rank, world_size):
+    log_main(rank, f"[data] Searching Recipe1M-style files under: {cfg['data_root']}")
     records = load_recipe_records(cfg["data_root"], cfg.get("image_root"))
+    log_main(rank, f"[data] Loaded {len(records)} recipes with at least one readable image path.")
+    log_main(rank, "[data] Loading train/val/test split ids...")
     split_ids = {split: load_split_ids(cfg["data_root"], split) for split in ("train", "val", "test")}
+    log_main(rank, "[data] Building text vocabulary from train split...")
     vocab = build_text_vocab(records, split_ids["train"], min_freq=cfg["min_freq"], max_vocab=cfg["max_vocab"])
     ingredient_labels = {}
     if cfg.get("use_ingredient_loss", True):
+        log_main(rank, "[data] Building ingredient multi-label vocabulary...")
         ingredient_labels = build_ingredient_labels(records, split_ids["train"], cfg["num_ingredient_labels"])
 
     datasets = {
@@ -293,12 +303,15 @@ def main():
         output_dir.mkdir(parents=True, exist_ok=True)
         with open(output_dir / "config_resolved.json", "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
+        print(f"[init] distributed={distributed} world_size={world_size} device={device}", flush=True)
+        print(f"[init] outputs will be written to: {output_dir}", flush=True)
 
     loaders, train_sampler, meta = build_loaders(cfg, distributed, rank, world_size)
     if is_main(rank):
         print("Split sizes:", meta["split_sizes"])
         print("Vocab size:", len(meta["vocab"]))
         print("Ingredient labels:", len(meta["ingredient_labels"]))
+        print(f"[model] Building {cfg['backbone']} backbone. pretrained={cfg['pretrained']}", flush=True)
 
     model = CrossModalRecipeModel(
         vocab_size=len(meta["vocab"]),
@@ -313,6 +326,7 @@ def main():
     ).to(device)
     if distributed:
         model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None)
+    log_main(rank, "[model] Model is ready.")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     scaler = GradScaler("cuda", enabled=cfg["amp"] and torch.cuda.is_available())
@@ -328,6 +342,7 @@ def main():
 
     history = []
     for epoch in range(start_epoch, cfg["epochs"]):
+        log_main(rank, f"[epoch {epoch}] Training started.")
         train_loss = train_one_epoch(
             model,
             loaders["train"],
